@@ -23,6 +23,185 @@ A hybrid orderbook-AMM system built as a Uniswap V4 hook contract, implementing 
 └── foundry.toml                 # Foundry configuration
 
 ```
+## System Architecture 
+
+FlowHook System Architecture
+ High-Level Overview
+
+FlowHook is a Uniswap V4 hook that combines a deleveraging indicator, custom curve,
+independent market pricing mechanics, and dynamic fees in a single Solidity contract.
+
+
+```
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                        UNISWAP V4 POOL MANAGER                     │
+│                                                                     │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │                    FlowHook.sol (Single Contract)             │  │
+│  │                                                               │  │
+│  │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐  │  │
+│  │  │  beforeSwap  │  │  afterSwap   │  │  beforeModify       │  │  │
+│  │  │  Hook        │  │  Hook        │  │  Position Hook      │  │  │
+│  │  └──────┬───────┘  └──────┬───────┘  └──────────┬──────────┘  │  │
+│  │         │                 │                      │             │  │
+│  │         ▼                 ▼                      ▼             │  │
+│  │  ┌────────────────────────────────────────────────────────┐   │  │
+│  │  │           EIP-1153 TRANSIENT STORAGE LAYER             │   │  │
+│  │  │                                                        │   │  │
+│  │  │  TSTORE/TLOAD: mid-transaction computation scratch     │   │  │
+│  │  │  - Pool depth deltas (ΔQ_vBTC)                         │   │  │
+│  │  │  - Intermediate volatility estimates                    │   │  │
+│  │  │  - Fee calculation intermediaries                       │   │  │
+│  │  │  - Component decomposition working data                │   │  │
+│  │  │                                                        │   │  │
+│  │  │  Cleared after each transaction (zero permanent cost)  │   │  │
+│  │  └────────────────────────────────────────────────────────┘   │  │
+│  │                          │                                    │  │
+│  │         ┌────────────────┼────────────────┐                   │  │
+│  │         ▼                ▼                ▼                   │  │
+│  │  ┌────────────┐  ┌────────────┐  ┌──────────────┐            │  │
+│  │  │  CUSTOM    │  │  DYNAMIC   │  │  COMPONENT   │            │  │
+│  │  │  CURVE     │  │  FEE       │  │  INDICATOR   │            │  │
+│  │  │  ENGINE    │  │  ENGINE    │  │  ENGINE      │            │  │
+│  │  └─────┬──────┘  └─────┬──────┘  └──────┬───────┘            │  │
+│  │        │               │                │                    │  │
+│  └────────┼───────────────┼────────────────┼────────────────────┘  │
+│           │               │                │                       │
+└───────────┼───────────────┼────────────────┼───────────────────────┘
+           │               │                │
+           ▼               ▼                ▼
+```
+
+## Core Engines
+
+Custom Curve Engine — Deleveraging & Independent Pricing
+
+
+Implements the pricing formula derived from the critical asymmetry finding:
+
+
+```
+P_vBTC = k × Q_vBTC⁻²
+
+
+Where:
+ k       = pool constant
+ Q_vBTC  = quantity of vBTC in pool
+ P_vBTC  = derived price
+
+
+Long opened  → Q_vBTC decreases → P sensitivity increases → volatility ↑
+Short opened → Q_vBTC increases → P sensitivity decreases → volatility ↓
+```
+
+
+Supports 4 independent pricing mechanisms via a unified interface:
+
+
+```
+┌───────────────────────────────────────────────────────┐
+│              CUSTOM CURVE ENGINE                      │
+│                                                       │
+│  ┌─────────────┐  ┌─────────────┐                    │
+│  │ LOB Mode    │  │ Hybrid Mode │                    │
+│  │ (Binance    │  │ (dYdX       │                    │
+│  │  style)     │  │  style)     │                    │
+│  │             │  │             │                    │
+│  │ Traders:    │  │ Traders:    │                    │
+│  │ Price MAKERS│  │ Price MAKERS│                    │
+│  └─────────────┘  └─────────────┘                    │
+│                                                       │
+│  ┌─────────────┐  ┌──────────────────┐               │
+│  │ VAMM Mode  │  │ Oracle Mode      │               │
+│  │ (Perp       │  │ (GMX/GNS style)  │               │
+│  │  style)     │  │                  │               │
+│  │             │  │ Traders:         │               │
+│  │ Traders:    │  │ Price TAKERS     │               │
+│  │ Pool MOVERS │  │                  │               │
+│  └──────┬──────┘  └────────┬─────────┘               │
+│         │                  │                         │
+│         │         ┌────────▼─────────┐               │
+│         │         │ Chainlink Oracle │               │
+│         │         │ Price Feed       │               │
+│         │         └──────────────────┘               │
+│         │                                            │
+│         ▼                                            │
+│  ┌──────────────────────────────────┐                │
+│  │ Long/Short Asymmetry Handler    │                │
+│  │                                  │                │
+│  │ Long OI coef:  +3.569e-9  (↑σ)  │                │
+│  │ Short OI coef: -1.678e-9  (↓σ)  │                │
+│  │                                  │                │
+│  │ Deleveraging trigger logic:      │                │
+│  │ When σ_estimated > threshold →   │                │
+│  │ adjust curve to reduce exposure  │                │
+│  └──────────────────────────────────┘                │
+└───────────────────────────────────────────────────────┘
+```
+
+## Dynamic Fee Engine — VAMM Hook Swap Fees
+
+
+```
+┌───────────────────────────────────────────────────┐
+│              DYNAMIC FEE ENGINE                   │
+│                                                   │
+│  Inputs (from transient storage):                 │
+│  ├── Current pool depth (Q_vBTC)                  │
+│  ├── Open interest imbalance (long - short)       │
+│  ├── Estimated volatility (σ_hat)                 │
+│  └── Speculative component ratio                  │
+│                                                   │
+│              ┌──────────────┐                     │
+│              │  Fee = f(σ,  │                     │
+│              │    OI_imbal, │                     │
+│              │    depth)    │                     │
+│              └──────┬───────┘                     │
+│                     │                             │
+│                     ▼                             │
+│  ┌──────────────────────────────────────┐         │
+│  │ Higher volatility    → Higher fee    │         │
+│  │ Deeper pool          → Lower fee     │         │
+│  │ OI imbalance (longs) → Higher fee    │         │
+│  │ Balanced OI          → Base fee      │         │
+│  └──────────────────────────────────────┘         │
+└───────────────────────────────────────────────────┘
+
+```
+## Component Indicator Engine — Decomposition
+
+Splits trading activity into expected (hedger/informed) and unexpected (speculative):
+
+```
+┌───────────────────────────────────────────────────────┐
+│           COMPONENT INDICATOR ENGINE                  │
+│                                                       │
+│  Raw Trading Activity                                 │
+│  ┌──────────┬──────────┬──────────┬──────────┐        │
+│  │ Volume   │ Open     │ Liquida- │ Leverage │        │
+│  │          │ Interest │ tions    │          │        │
+│  └────┬─────┴────┬─────┴────┬─────┴────┬─────┘        │
+│       │          │          │          │              │
+│       ▼          ▼          ▼          ▼              │
+│  ┌──────────────────────────────────────────┐         │
+│  │         ARIMA Decomposition              │         │
+│  │         (on-chain approximation)         │         │
+│  └─────────────┬────────────────────────────┘         │
+│                │                                      │
+│       ┌────────┴────────┐                             │
+│       ▼                 ▼                             │
+│  ┌──────────┐     ┌───────────┐                       │
+│  │ EXPECTED │     │ UNEXPECTED│                       │
+│  │ (Hedger/ │     │ (Specula- │                       │
+│  │ Informed)│     │  tive)    │                       │
+│  └──────────┘     └───────────┘                       │
+│                                                       │
+│  → Fed to Custom Curve + Dynamic Fee engines          │
+│  → Exposed to Admin Dashboard                         │
+└───────────────────────────────────────────────────────┘
+
+```
 
 ## Dependencies
 
