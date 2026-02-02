@@ -1,6 +1,6 @@
 # FlowHook
 
-A hybrid orderbook-AMM system built as a Uniswap V4 hook contract, implementing Kyle model mechanics with dynamic volatility adjustment based on open interest composition.
+A custom curve, independent market pricing mechanics system built as a Uniswap V4 hook contract, implementing Kyle model with dynamic volatility indicator based on open interest composition.
 
 ## Project Structure
 
