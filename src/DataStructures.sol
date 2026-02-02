@@ -90,3 +90,15 @@ struct PackedFeeState {
     uint32 lastUpdateBlock;
     bool isPaused;
 }
+
+/// @notice Component indicator state for trading activity decomposition
+struct ComponentIndicatorState {
+    uint256 expectedComponent;      // Hedger/informed trader activity
+    uint256 unexpectedComponent;    // Speculative trader activity
+    uint256 speculativeRatio;       // Ratio of speculative to total (scaled by 1e18)
+    uint256 totalVolume;            // Total trading volume tracked
+    uint256 totalOpenInterest;      // Total OI tracked
+    uint256 totalLiquidations;      // Total liquidations tracked
+    uint256 averageLeverage;        // Average leverage (scaled by 1e18)
+    uint256 lastUpdateBlock;        // Last update block number
+}

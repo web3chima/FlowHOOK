@@ -145,3 +145,17 @@ event AdminActionExecuted(
     bytes params,
     uint256 timestamp
 );
+
+/// @notice Emitted when component indicator values are updated
+/// @param expectedComponent The expected (hedger/informed) component value
+/// @param unexpectedComponent The unexpected (speculative) component value
+/// @param speculativeRatio The ratio of speculative to total activity
+/// @param totalVolume The total trading volume
+/// @param timestamp The block timestamp
+event ComponentIndicatorUpdated(
+    uint256 expectedComponent,
+    uint256 unexpectedComponent,
+    uint256 speculativeRatio,
+    uint256 totalVolume,
+    uint256 timestamp
+);
