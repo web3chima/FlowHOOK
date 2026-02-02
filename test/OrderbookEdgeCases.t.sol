@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {PropertyTestHelper} from "./helpers/PropertyTestHelper.sol";
 import {OrderbookEngine} from "../src/OrderbookEngine.sol";
+import {CustodyManager} from "../src/CustodyManager.sol";
 import {Order} from "../src/DataStructures.sol";
 import {InsufficientBalance, ZeroAmount, InvalidInput} from "../src/Errors.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
@@ -11,7 +12,7 @@ import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 /// @title Orderbook Engine Test Contract
 /// @notice Concrete implementation of OrderbookEngine for testing
 contract OrderbookEngineTestContract is OrderbookEngine {
-    constructor(address _token0, address _token1) OrderbookEngine(_token0, _token1) {}
+    constructor(address _token0, address _token1) CustodyManager(_token0, _token1) {}
 
     function placeOrder(bool isBuy, uint256 price, uint256 quantity) external returns (uint256) {
         return _placeOrder(isBuy, price, quantity);

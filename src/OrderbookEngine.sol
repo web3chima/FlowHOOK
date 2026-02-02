@@ -23,9 +23,8 @@ abstract contract OrderbookEngine is CustodyManager {
     uint256 public nextOrderId;
 
     /// @notice Initialize orderbook engine
-    /// @param _token0 Address of token0
-    /// @param _token1 Address of token1
-    constructor(address _token0, address _token1) CustodyManager(_token0, _token1) {
+    /// @dev Constructor removed - initialization happens in derived contract
+    constructor() {
         nextOrderId = 1; // Start from 1, 0 is reserved for "no order"
     }
 
