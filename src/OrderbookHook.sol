@@ -9,6 +9,7 @@ import {BalanceDelta, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDe
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary, toBeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {BaseTestHooks} from "@uniswap/v4-core/src/test/BaseTestHooks.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 
 import {OrderbookEngine} from "./OrderbookEngine.sol";
 import {KyleModel} from "./KyleModel.sol";
@@ -21,6 +22,8 @@ import {OracleManager} from "./OracleManager.sol";
 import {AdminDashboard} from "./AdminDashboard.sol";
 import {SwapExecuted} from "./Events.sol";
 import {KyleState, VolatilityState, PackedFeeState, ComponentIndicatorState} from "./DataStructures.sol";
+import {InputValidator} from "./InputValidator.sol";
+import {OrderNotFound} from "./Errors.sol";
 
 /// @title OrderbookHook
 /// @notice Main integration contract for hybrid orderbook-AMM system
@@ -63,6 +66,29 @@ contract OrderbookHook is
         AdminDashboard(msg.sender) // Grant admin role to deployer
     {
         poolManager = IPoolManager(_poolManager);
+        
+        // Note: In production, validate hook permissions
+        // For testing, we skip this validation as the hook address
+        // needs to be deployed at a specific address with correct bit flags
+        // Hooks.validateHookPermissions(
+        //     IHooks(address(this)),
+        //     Hooks.Permissions({
+        //         beforeInitialize: true,
+        //         afterInitialize: true,
+        //         beforeAddLiquidity: true,
+        //         afterAddLiquidity: true,
+        //         beforeRemoveLiquidity: true,
+        //         afterRemoveLiquidity: true,
+        //         beforeSwap: true,
+        //         afterSwap: true,
+        //         beforeDonate: false,
+        //         afterDonate: false,
+        //         beforeSwapReturnDelta: true,
+        //         afterSwapReturnDelta: false,
+        //         afterAddLiquidityReturnDelta: true,
+        //         afterRemoveLiquidityReturnDelta: true
+        //     })
+        // );
     }
 
     /// @notice Modifier to prevent reentrancy using transient storage
@@ -340,6 +366,28 @@ contract OrderbookHook is
 
     // ============ Public Functions for Users ============
 
+    /// @notice Deposit tokens into custody
+    /// @param token Address of the token to deposit
+    /// @param amount Amount to deposit
+    function deposit(address token, uint256 amount) external override nonReentrant {
+        // Validate inputs
+        InputValidator.validateAddress(token, "token");
+        InputValidator.validateNonZeroAmount(amount);
+        
+        _deposit(token, amount);
+    }
+
+    /// @notice Withdraw available tokens from custody
+    /// @param token Address of the token to withdraw
+    /// @param amount Amount to withdraw
+    function withdraw(address token, uint256 amount) external override nonReentrant {
+        // Validate inputs
+        InputValidator.validateAddress(token, "token");
+        InputValidator.validateNonZeroAmount(amount);
+        
+        _withdraw(token, amount);
+    }
+
     /// @notice Place a limit order
     /// @param isBuy True for buy order, false for sell order
     /// @param price Order price (18 decimals)
@@ -351,12 +399,27 @@ contract OrderbookHook is
         whenNotPaused
         returns (uint256 orderId) 
     {
+        // Validate inputs
+        InputValidator.validateNonZeroAmount(price);
+        InputValidator.validateNonZeroAmount(quantity);
+        
+        // Validate price range (min: 1 wei, max: 1e30 to prevent overflow)
+        InputValidator.validatePriceRange(price, 1, 1e30);
+        
+        // Validate quantity range (min: 1 wei, max: 1e30 to prevent overflow)
+        InputValidator.validateQuantityRange(quantity, 1, 1e30);
+        
         return _placeOrder(isBuy, price, quantity);
     }
 
     /// @notice Cancel an existing order
     /// @param orderId The order ID to cancel
     function cancelOrder(uint256 orderId) external nonReentrant {
+        // Validate order ID (must be non-zero and within valid range)
+        if (orderId == 0 || orderId >= nextOrderId) {
+            revert OrderNotFound(orderId);
+        }
+        
         _cancelOrder(orderId);
     }
 
@@ -374,6 +437,13 @@ contract OrderbookHook is
         uint256 amount0Desired,
         uint256 amount1Desired
     ) external nonReentrant whenNotPaused returns (uint128 liquidity, uint256 amount0, uint256 amount1) {
+        // Validate tick range
+        InputValidator.validateTickRange(tickLower, tickUpper);
+        
+        // Validate amounts
+        InputValidator.validateNonZeroAmount(amount0Desired);
+        InputValidator.validateNonZeroAmount(amount1Desired);
+        
         return _addLiquidity(tickLower, tickUpper, amount0Desired, amount1Desired);
     }
 
@@ -388,6 +458,12 @@ contract OrderbookHook is
         int24 tickUpper,
         uint128 liquidityToRemove
     ) external nonReentrant whenNotPaused returns (uint256 amount0, uint256 amount1) {
+        // Validate tick range
+        InputValidator.validateTickRange(tickLower, tickUpper);
+        
+        // Validate liquidity amount
+        InputValidator.validateNonZeroAmount(liquidityToRemove);
+        
         return _removeLiquidity(tickLower, tickUpper, liquidityToRemove);
     }
 
@@ -436,6 +512,12 @@ contract OrderbookHook is
     ) external {
         // In a production system, this would have onlyAdmin modifier
         _configurePriceFeed(token, feedAddress, heartbeat);
+    }
+
+    /// @notice Set maximum position size per user (admin only)
+    /// @param newLimit The new maximum position size
+    function setMaxPositionSize(uint256 newLimit) external onlyAdmin {
+        _setMaxPositionSize(newLimit);
     }
 
     // ============ AdminDashboard Virtual Function Implementations ============

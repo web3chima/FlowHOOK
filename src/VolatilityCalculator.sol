@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 import {VolatilityState} from "./DataStructures.sol";
 import {Constants} from "./Constants.sol";
 import {InvalidInput, ExcessiveVolatility} from "./Errors.sol";
+import {VolatilityMath} from "./libraries/VolatilityMath.sol";
+import "./Events.sol";
 
 /// @title Volatility Calculator
 /// @notice Dynamically adjusts effective volatility based on open interest composition
@@ -42,27 +44,11 @@ abstract contract VolatilityCalculator {
     /// @dev Formula: baseVolatility + (longOI * 3.569e-9) + (shortOI * -1.678e-9)
     /// @return The calculated effective volatility
     function calculateEffectiveVolatility() public view returns (uint256) {
-        // Start with base volatility
-        int256 effectiveVol = int256(volatilityState.baseVolatility);
-
-        // Add long OI contribution (positive coefficient)
-        // longOI * 3.569e-9 = (longOI * 3569) / 1e12
-        int256 longContribution = (int256(volatilityState.longOI) * Constants.LONG_OI_COEFFICIENT) / 
-                                  int256(Constants.COEFFICIENT_SCALE);
-        effectiveVol += longContribution;
-
-        // Add short OI contribution (negative coefficient)
-        // shortOI * -1.678e-9 = (shortOI * -1678) / 1e12
-        int256 shortContribution = (int256(volatilityState.shortOI) * Constants.SHORT_OI_COEFFICIENT) / 
-                                   int256(Constants.COEFFICIENT_SCALE);
-        effectiveVol += shortContribution;
-
-        // Ensure volatility is non-negative
-        if (effectiveVol < 0) {
-            return 0;
-        }
-
-        return uint256(effectiveVol);
+        return VolatilityMath.calculateEffectiveVolatility(
+            volatilityState.baseVolatility,
+            volatilityState.longOI,
+            volatilityState.shortOI
+        );
     }
 
     /// @notice Update open interest tracking
@@ -70,29 +56,9 @@ abstract contract VolatilityCalculator {
     /// @param delta The change in OI (can be positive or negative)
     function _updateOpenInterest(bool isLong, int256 delta) internal {
         if (isLong) {
-            // Update long OI
-            if (delta >= 0) {
-                volatilityState.longOI += uint256(delta);
-            } else {
-                uint256 decrease = uint256(-delta);
-                if (decrease > volatilityState.longOI) {
-                    volatilityState.longOI = 0;
-                } else {
-                    volatilityState.longOI -= decrease;
-                }
-            }
+            volatilityState.longOI = VolatilityMath.updateOI(volatilityState.longOI, delta);
         } else {
-            // Update short OI
-            if (delta >= 0) {
-                volatilityState.shortOI += uint256(delta);
-            } else {
-                uint256 decrease = uint256(-delta);
-                if (decrease > volatilityState.shortOI) {
-                    volatilityState.shortOI = 0;
-                } else {
-                    volatilityState.shortOI -= decrease;
-                }
-            }
+            volatilityState.shortOI = VolatilityMath.updateOI(volatilityState.shortOI, delta);
         }
 
         // Recalculate effective volatility
@@ -102,6 +68,15 @@ abstract contract VolatilityCalculator {
         _checkVolatilityBounds(newEffectiveVolatility);
         
         volatilityState.effectiveVolatility = newEffectiveVolatility;
+        
+        // Emit volatility update event (Requirement 13.6)
+        emit VolatilityUpdated(
+            newEffectiveVolatility,
+            volatilityState.longOI,
+            volatilityState.shortOI,
+            _adjustPoolDepth(1e18), // Use 1e18 as base to get effective depth ratio
+            block.timestamp
+        );
     }
 
     /// @notice Adjust pool depth based on volatility changes
@@ -109,20 +84,11 @@ abstract contract VolatilityCalculator {
     /// @param baseDepth The base pool depth
     /// @return adjustedDepth The adjusted pool depth
     function _adjustPoolDepth(uint256 baseDepth) internal view returns (uint256 adjustedDepth) {
-        // Calculate depth adjustment factor based on volatility ratio
-        // If effectiveVolatility > baseVolatility, reduce depth (thinner pool)
-        // If effectiveVolatility < baseVolatility, increase depth (deeper pool)
-        
-        uint256 effectiveVol = volatilityState.effectiveVolatility;
-        uint256 baseVol = volatilityState.baseVolatility;
-
-        if (baseVol == 0) {
-            return baseDepth;
-        }
-
-        // adjustedDepth = baseDepth * (baseVolatility / effectiveVolatility)
-        // This ensures: higher volatility -> lower depth, lower volatility -> higher depth
-        adjustedDepth = (baseDepth * baseVol) / effectiveVol;
+        adjustedDepth = VolatilityMath.adjustPoolDepth(
+            baseDepth,
+            volatilityState.effectiveVolatility,
+            volatilityState.baseVolatility
+        );
     }
 
     /// @notice Check if volatility is within safety bounds
@@ -137,24 +103,10 @@ abstract contract VolatilityCalculator {
     /// @return shouldUpdate True if volatility changed by more than 1%
     function _shouldUpdateVolatility() internal view returns (bool shouldUpdate) {
         uint256 currentEffectiveVolatility = calculateEffectiveVolatility();
-        
-        if (previousEffectiveVolatility == 0) {
-            return currentEffectiveVolatility > 0;
-        }
-
-        // Calculate percentage change
-        uint256 change;
-        if (currentEffectiveVolatility > previousEffectiveVolatility) {
-            change = currentEffectiveVolatility - previousEffectiveVolatility;
-        } else {
-            change = previousEffectiveVolatility - currentEffectiveVolatility;
-        }
-
-        // Check if change exceeds 1% threshold
-        // change / previousEffectiveVolatility > 0.01
-        // change * 10000 > previousEffectiveVolatility * 100
-        shouldUpdate = (change * Constants.THRESHOLD_DENOMINATOR) > 
-                       (previousEffectiveVolatility * Constants.VOLATILITY_UPDATE_THRESHOLD);
+        shouldUpdate = VolatilityMath.shouldUpdateForVolatilityChange(
+            currentEffectiveVolatility,
+            previousEffectiveVolatility
+        );
     }
 
     /// @notice Update the previous effective volatility for threshold tracking

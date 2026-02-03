@@ -2,9 +2,11 @@
 pragma solidity ^0.8.24;
 
 import {Order} from "./DataStructures.sol";
-import {OrderNotFound, UnauthorizedCancellation, InvalidInput, ZeroAmount} from "./Errors.sol";
+import {OrderNotFound, UnauthorizedCancellation, InvalidInput, ZeroAmount, PositionSizeExceeded} from "./Errors.sol";
 import {OrderPlaced, OrderMatched, OrderCancelled} from "./Events.sol";
 import {CustodyManager} from "./CustodyManager.sol";
+import {Constants} from "./Constants.sol";
+import {OrderbookMath} from "./libraries/OrderbookMath.sol";
 
 /// @title Orderbook Engine
 /// @notice Manages limit orders with price-time priority matching
@@ -22,10 +24,17 @@ abstract contract OrderbookEngine is CustodyManager {
     /// @notice Counter for generating unique order IDs
     uint256 public nextOrderId;
 
+    /// @notice Mapping from user address to their current position size (in token0)
+    mapping(address => uint256) public userPositionSize;
+
+    /// @notice Maximum position size per user (configurable by admin)
+    uint256 public maxPositionSizePerUser;
+
     /// @notice Initialize orderbook engine
     /// @dev Constructor removed - initialization happens in derived contract
     constructor() {
         nextOrderId = 1; // Start from 1, 0 is reserved for "no order"
+        maxPositionSizePerUser = Constants.DEFAULT_MAX_POSITION_SIZE;
     }
 
     /// @notice Get all buy order IDs
@@ -71,12 +80,28 @@ abstract contract OrderbookEngine is CustodyManager {
         if (price == 0) revert InvalidInput("price");
         if (quantity == 0) revert ZeroAmount();
 
+        // Check position size limits
+        uint256 currentPositionSize = userPositionSize[msg.sender];
+        uint256 newPositionSize = currentPositionSize + quantity;
+        
+        if (newPositionSize > maxPositionSizePerUser) {
+            revert PositionSizeExceeded(
+                msg.sender,
+                currentPositionSize,
+                newPositionSize,
+                maxPositionSizePerUser
+            );
+        }
+
         // Determine which token to lock
         address tokenToLock = isBuy ? token1 : token0;
-        uint256 amountToLock = isBuy ? (price * quantity) / 1e18 : quantity;
+        uint256 amountToLock = OrderbookMath.calculateLockAmount(isBuy, price, quantity);
 
         // Lock the required assets
         _lockForOrder(msg.sender, tokenToLock, amountToLock);
+
+        // Update user position size
+        userPositionSize[msg.sender] = newPositionSize;
 
         // Create the order
         orderId = nextOrderId++;
@@ -161,24 +186,36 @@ abstract contract OrderbookEngine is CustodyManager {
             Order storage buyOrder = orders[buyOrderIds[0]];
             Order storage sellOrder = orders[sellOrderIds[0]];
 
-            // Check if orders can match (buy price >= sell price)
-            if (buyOrder.price < sellOrder.price) {
+            // Check if orders can match using library
+            if (!OrderbookMath.canOrdersMatch(buyOrder.price, sellOrder.price)) {
                 break;
             }
 
-            // Execute at maker price (the order that was placed first)
-            uint256 executionPrice = buyOrder.timestamp <= sellOrder.timestamp ? buyOrder.price : sellOrder.price;
+            // Execute at maker price using library
+            uint256 executionPrice = OrderbookMath.determineExecutionPrice(
+                buyOrder.price,
+                sellOrder.price,
+                buyOrder.timestamp,
+                sellOrder.timestamp
+            );
 
-            // Determine fill quantity (minimum of both orders)
-            uint256 fillQuantity = buyOrder.quantity < sellOrder.quantity ? buyOrder.quantity : sellOrder.quantity;
+            // Determine fill quantity using library
+            uint256 fillQuantity = OrderbookMath.calculateFillQuantity(
+                buyOrder.quantity,
+                sellOrder.quantity
+            );
 
             // Calculate value for VWAP
-            totalValue += executionPrice * fillQuantity;
-            matchedVolume += fillQuantity;
+            unchecked {
+                totalValue += executionPrice * fillQuantity;
+                matchedVolume += fillQuantity;
+            }
 
-            // Calculate actual amounts to transfer
-            uint256 token0Amount = fillQuantity;
-            uint256 token1Amount = (executionPrice * fillQuantity) / 1e18;
+            // Calculate actual amounts to transfer using library
+            (uint256 token0Amount, uint256 token1Amount) = OrderbookMath.calculateTradeAmounts(
+                executionPrice,
+                fillQuantity
+            );
 
             // Transfer token0 from seller to buyer
             _transferBetweenUsers(sellOrder.trader, buyOrder.trader, token0, token0Amount);
@@ -187,12 +224,18 @@ abstract contract OrderbookEngine is CustodyManager {
             _transferBetweenUsers(buyOrder.trader, sellOrder.trader, token1, token1Amount);
 
             // Update order quantities
-            buyOrder.quantity -= fillQuantity;
-            sellOrder.quantity -= fillQuantity;
+            unchecked {
+                buyOrder.quantity -= fillQuantity;
+                sellOrder.quantity -= fillQuantity;
 
-            // Update locked amounts
-            buyOrder.lockedAmount -= token1Amount;
-            sellOrder.lockedAmount -= token0Amount;
+                // Update locked amounts
+                buyOrder.lockedAmount -= token1Amount;
+                sellOrder.lockedAmount -= token0Amount;
+
+                // Update position sizes (reduce as orders are filled)
+                userPositionSize[buyOrder.trader] -= fillQuantity;
+                userPositionSize[sellOrder.trader] -= fillQuantity;
+            }
 
             // Emit match event
             emit OrderMatched(buyOrder.orderId, sellOrder.orderId, executionPrice, fillQuantity, block.timestamp);
@@ -206,10 +249,8 @@ abstract contract OrderbookEngine is CustodyManager {
             }
         }
 
-        // Calculate volume-weighted average price
-        if (matchedVolume > 0) {
-            avgPrice = totalValue / matchedVolume;
-        }
+        // Calculate volume-weighted average price using library
+        avgPrice = OrderbookMath.calculateVWAP(totalValue, matchedVolume);
     }
 
     /// @notice Remove order from queue by index
@@ -249,6 +290,11 @@ abstract contract OrderbookEngine is CustodyManager {
         address tokenToUnlock = order.isBuy ? token1 : token0;
         _unlockFromOrder(order.trader, tokenToUnlock, order.lockedAmount);
 
+        // Reduce user position size
+        unchecked {
+            userPositionSize[order.trader] -= order.quantity;
+        }
+
         // Emit cancellation event
         emit OrderCancelled(orderId, order.trader, order.lockedAmount, block.timestamp);
 
@@ -272,5 +318,22 @@ abstract contract OrderbookEngine is CustodyManager {
 
         // If we reach here, order was not found in queue
         revert OrderNotFound(orderId);
+    }
+
+    /// @notice Get user's current position size
+    /// @param user The user address
+    /// @return The current position size
+    function getUserPositionSize(address user) external view returns (uint256) {
+        return userPositionSize[user];
+    }
+
+    /// @notice Set maximum position size per user (admin only)
+    /// @param newLimit The new maximum position size
+    function _setMaxPositionSize(uint256 newLimit) internal {
+        require(
+            newLimit >= Constants.MIN_POSITION_SIZE_LIMIT,
+            "Position size limit too low"
+        );
+        maxPositionSizePerUser = newLimit;
     }
 }

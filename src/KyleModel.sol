@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {KyleState} from "./DataStructures.sol";
 import {Constants} from "./Constants.sol";
 import {InvalidInput} from "./Errors.sol";
+import {KyleMath} from "./libraries/KyleMath.sol";
 
 /// @title Kyle Model Pricing
 /// @notice Implements Kyle model mechanics for price impact calculation
@@ -37,9 +38,7 @@ abstract contract KyleModel {
     /// @param orderFlow The net order flow (positive for buys, negative for sells)
     /// @return impact The calculated price impact (can be positive or negative)
     function calculatePriceImpact(int256 orderFlow) public view returns (int256 impact) {
-        // Price impact = lambda * orderFlow
-        // Lambda is stored with PRICE_PRECISION, so we need to scale down
-        impact = (int256(kyleState.lambda) * orderFlow) / int256(Constants.PRICE_PRECISION);
+        impact = KyleMath.calculatePriceImpact(kyleState.lambda, orderFlow);
     }
 
     /// @notice Track cumulative order flow for informed trading detection
@@ -54,8 +53,8 @@ abstract contract KyleModel {
     function _updateKyleParameters(uint256 currentVolatility, uint256 currentDepth) internal {
         if (currentDepth == 0) revert InvalidInput("currentDepth");
 
-        // Calculate new lambda: volatility / effectiveDepth
-        kyleState.lambda = (currentVolatility * Constants.PRICE_PRECISION) / currentDepth;
+        // Calculate new lambda using library
+        kyleState.lambda = KyleMath.calculateLambda(currentVolatility, currentDepth);
         kyleState.effectiveDepth = currentDepth;
         kyleState.lastUpdateBlock = block.number;
     }
@@ -64,22 +63,7 @@ abstract contract KyleModel {
     /// @param currentTotalOI The current total open interest (long + short)
     /// @return shouldUpdate True if OI changed by more than 5%
     function _shouldUpdateKyleParameters(uint256 currentTotalOI) internal view returns (bool shouldUpdate) {
-        if (previousTotalOI == 0) {
-            return currentTotalOI > 0;
-        }
-
-        // Calculate percentage change
-        uint256 change;
-        if (currentTotalOI > previousTotalOI) {
-            change = currentTotalOI - previousTotalOI;
-        } else {
-            change = previousTotalOI - currentTotalOI;
-        }
-
-        // Check if change exceeds 5% threshold
-        // change / previousTotalOI > 0.05
-        // change * 10000 > previousTotalOI * 500
-        shouldUpdate = (change * Constants.THRESHOLD_DENOMINATOR) > (previousTotalOI * Constants.OI_UPDATE_THRESHOLD);
+        shouldUpdate = KyleMath.shouldUpdateForOIChange(currentTotalOI, previousTotalOI);
     }
 
     /// @notice Update the previous total OI for threshold tracking

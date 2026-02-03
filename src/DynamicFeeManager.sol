@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {DynamicFeeCalculator} from "./DynamicFeeCalculator.sol";
 import {PackedFeeState} from "./DataStructures.sol";
 import {Constants} from "./Constants.sol";
+import "./Events.sol";
 
 /// @title Dynamic Fee Manager
 /// @notice Contract wrapper for DynamicFeeCalculator library
@@ -64,8 +65,31 @@ abstract contract DynamicFeeManager {
 
     /// @notice Update fee state with new calculated fee
     /// @param newFee The new fee to set
-    function _updateFeeState(uint24 newFee) internal {
+    /// @param volatilityMult The volatility multiplier used
+    /// @param imbalanceMult The imbalance multiplier used
+    /// @param utilizationMult The utilization multiplier used
+    function _updateFeeState(
+        uint24 newFee,
+        uint256 volatilityMult,
+        uint256 imbalanceMult,
+        uint256 utilizationMult
+    ) internal {
         feeState.currentFee = newFee;
         feeState.lastUpdateBlock = uint32(block.number);
+        
+        // Emit fee update event (Requirement 13.7)
+        emit FeeUpdated(
+            newFee,
+            volatilityMult,
+            imbalanceMult,
+            utilizationMult,
+            block.timestamp
+        );
+    }
+    
+    /// @notice Update fee state with new calculated fee (simple version)
+    /// @param newFee The new fee to set
+    function _updateFeeState(uint24 newFee) internal {
+        _updateFeeState(newFee, Constants.MULTIPLIER_SCALE, Constants.MULTIPLIER_SCALE, Constants.MULTIPLIER_SCALE);
     }
 }

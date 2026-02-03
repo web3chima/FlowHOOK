@@ -19,6 +19,9 @@ abstract contract AdminDashboard {
     /// @notice Slot for pause state tracking
     uint256 private constant PAUSE_STATE_SLOT = uint256(keccak256("pause.state.slot"));
     
+    /// @notice Slot for reentrancy lock
+    uint256 private constant REENTRANCY_LOCK_SLOT = uint256(keccak256("reentrancy.lock.slot"));
+    
     // ============ Storage Variables ============
     
     /// @notice Admin role identifier
@@ -54,6 +57,16 @@ abstract contract AdminDashboard {
             revert TradingPaused();
         }
         _;
+    }
+    
+    /// @notice Prevents reentrancy using transient storage
+    modifier nonReentrantAdmin() {
+        uint256 locked = getTransient(REENTRANCY_LOCK_SLOT);
+        require(locked == 0, "Reentrancy detected");
+        
+        setTransient(REENTRANCY_LOCK_SLOT, 1);
+        _;
+        setTransient(REENTRANCY_LOCK_SLOT, 0);
     }
     
     // ============ Transient Storage Helpers ============
@@ -94,7 +107,12 @@ abstract contract AdminDashboard {
     
     /// @notice Grant admin role to an address
     /// @param account The address to grant admin role
-    function grantAdminRole(address account) external onlyAdmin {
+    function grantAdminRole(address account) external onlyAdmin nonReentrantAdmin {
+        // Validate address
+        if (account == address(0)) {
+            revert InvalidInput("account cannot be zero address");
+        }
+        
         _grantRole(ADMIN_ROLE, account);
         emit AdminActionExecuted(
             msg.sender,
@@ -106,7 +124,17 @@ abstract contract AdminDashboard {
     
     /// @notice Revoke admin role from an address
     /// @param account The address to revoke admin role from
-    function revokeAdminRole(address account) external onlyAdmin {
+    function revokeAdminRole(address account) external onlyAdmin nonReentrantAdmin {
+        // Validate address
+        if (account == address(0)) {
+            revert InvalidInput("account cannot be zero address");
+        }
+        
+        // Prevent revoking own admin role
+        if (account == msg.sender) {
+            revert InvalidInput("cannot revoke own admin role");
+        }
+        
         _revokeRole(ADMIN_ROLE, account);
         emit AdminActionExecuted(
             msg.sender,
@@ -120,7 +148,7 @@ abstract contract AdminDashboard {
     
     /// @notice Pause trading operations
     /// @dev Withdrawals and order cancellations remain allowed when paused
-    function pauseTrading() external onlyAdmin {
+    function pauseTrading() external onlyAdmin nonReentrantAdmin {
         isPaused = true;
         
         // Track pause action in transient storage
@@ -135,7 +163,7 @@ abstract contract AdminDashboard {
     }
     
     /// @notice Unpause trading operations
-    function unpauseTrading() external onlyAdmin {
+    function unpauseTrading() external onlyAdmin nonReentrantAdmin {
         isPaused = false;
         
         // Track unpause action in transient storage
@@ -154,7 +182,7 @@ abstract contract AdminDashboard {
     /// @notice Update fee parameters
     /// @param baseFee The new base fee (in basis points)
     /// @param maxFee The new maximum fee (in basis points)
-    function updateFeeParameters(uint24 baseFee, uint24 maxFee) external onlyAdmin {
+    function updateFeeParameters(uint24 baseFee, uint24 maxFee) external onlyAdmin nonReentrantAdmin {
         // Validate parameter bounds
         // Base fee: min 0.01% (100), max 0.5% (5000)
         validateParameterBounds("baseFee", baseFee, 100, 5000);
@@ -184,7 +212,7 @@ abstract contract AdminDashboard {
     /// @notice Update volatility coefficients
     /// @param longCoeff The coefficient for long OI impact on volatility (scaled by 1e12)
     /// @param shortCoeff The coefficient for short OI impact on volatility (scaled by 1e12)
-    function updateVolatilityCoefficients(int256 longCoeff, int256 shortCoeff) external onlyAdmin {
+    function updateVolatilityCoefficients(int256 longCoeff, int256 shortCoeff) external onlyAdmin nonReentrantAdmin {
         // Validate coefficient bounds
         // Long coefficient: min 0, max 10000 (10000e-9 = 1e-5)
         if (longCoeff < 0 || longCoeff > 10000) {

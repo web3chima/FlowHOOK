@@ -46,6 +46,11 @@ contract OracleManager {
         require(token != address(0), "Invalid token address");
         require(feedAddress != address(0), "Invalid feed address");
         
+        // Validate heartbeat range if provided (min: 1 minute, max: 1 hour)
+        if (heartbeat != 0) {
+            require(heartbeat >= 1 minutes && heartbeat <= 1 hours, "Invalid heartbeat");
+        }
+        
         uint256 effectiveHeartbeat = heartbeat == 0 ? ORACLE_HEARTBEAT : heartbeat;
         
         priceFeeds[token] = PriceFeed({
@@ -63,6 +68,9 @@ contract OracleManager {
     /// @return price The latest price from oracle
     /// @return updatedAt The timestamp of the price update
     function updateOraclePrice(address token) public returns (int256 price, uint256 updatedAt) {
+        // Validate token address
+        require(token != address(0), "Invalid token address");
+        
         PriceFeed storage feed = priceFeeds[token];
         require(feed.feedAddress != address(0), "Price feed not configured");
         
@@ -109,6 +117,10 @@ contract OracleManager {
         address token,
         uint256 internalPrice
     ) public returns (bool isValid, uint256 deviation) {
+        // Validate inputs
+        require(token != address(0), "Invalid token address");
+        require(internalPrice > 0, "Invalid internal price");
+        
         // Update oracle price first
         (int256 oraclePrice, ) = updateOraclePrice(token);
         
@@ -191,6 +203,10 @@ contract OracleManager {
         address token,
         uint256 deleveragePrice
     ) public returns (bool isValid) {
+        // Validate inputs
+        require(token != address(0), "Invalid token address");
+        require(deleveragePrice > 0, "Invalid deleverage price");
+        
         // Get oracle price
         (int256 oraclePrice, ) = updateOraclePrice(token);
         

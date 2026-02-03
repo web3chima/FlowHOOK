@@ -59,4 +59,9 @@ library Constants {
     uint256 internal constant PRICE_PRECISION = 1e18;
     uint256 internal constant VOLATILITY_PRECISION = 1e18;
     uint256 internal constant DEPTH_PRECISION = 1e18;
+
+    // Position Size Limits
+    uint256 internal constant DEFAULT_MAX_POSITION_SIZE = 1000000 * 1e18; // 1 million tokens default
+    uint256 internal constant MIN_POSITION_SIZE_LIMIT = 1000 * 1e18; // Minimum 1000 tokens
+    uint256 internal constant MAX_POSITION_SIZE_LIMIT = type(uint256).max; // No upper bound for admin config
 }
