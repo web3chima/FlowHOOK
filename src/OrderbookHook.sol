@@ -21,9 +21,13 @@ import {DeleveragingCurve} from "./DeleveragingCurve.sol";
 import {OracleManager} from "./OracleManager.sol";
 import {AdminDashboard} from "./AdminDashboard.sol";
 import {SwapExecuted} from "./Events.sol";
-import {KyleState, VolatilityState, PackedFeeState, ComponentIndicatorState} from "./DataStructures.sol";
+import {KyleState, VolatilityState, PackedFeeState, ComponentIndicatorState, CurveMode, CurveModeState} from "./DataStructures.sol";
+import {CustomCurveEngine} from "./CustomCurveEngine.sol";
 import {InputValidator} from "./InputValidator.sol";
 import {OrderNotFound} from "./Errors.sol";
+import {HookHelpers} from "./libraries/HookHelpers.sol";
+import {HookCallbacks} from "./libraries/HookCallbacks.sol";
+import {UserOperations} from "./libraries/UserOperations.sol";
 
 /// @title OrderbookHook
 /// @notice Main integration contract for hybrid orderbook-AMM system
@@ -38,12 +42,17 @@ contract OrderbookHook is
     ComponentIndicator,
     DeleveragingCurve,
     OracleManager,
-    AdminDashboard
+    AdminDashboard,
+    CustomCurveEngine
 {
     using BeforeSwapDeltaLibrary for BeforeSwapDelta;
+    using HookCallbacks for *;
 
     /// @notice The Uniswap V4 PoolManager
     IPoolManager public immutable poolManager;
+
+    /// @notice Current curve mode configuration
+    CurveModeState public curveModeState;
 
     /// @notice Constructor
     /// @param _poolManager Address of Uniswap V4 PoolManager
@@ -66,6 +75,15 @@ contract OrderbookHook is
         AdminDashboard(msg.sender) // Grant admin role to deployer
     {
         poolManager = IPoolManager(_poolManager);
+        
+        // Initialize curve mode to HYBRID (orderbook + AMM) by default
+        curveModeState = CurveModeState({
+            activeMode: CurveMode.HYBRID,
+            oracleFeed: address(0),
+            useOrderbook: true,
+            usePool: true,
+            lastModeChange: block.number
+        });
         
         // Note: In production, validate hook permissions
         // For testing, we skip this validation as the hook address
@@ -120,13 +138,8 @@ contract OrderbookHook is
         PoolKey calldata key,
         uint160 sqrtPriceX96
     ) external override returns (bytes4) {
-        // Validate tokens match our configuration
-        require(
-            Currency.unwrap(key.currency0) == token0 && Currency.unwrap(key.currency1) == token1,
-            "Token mismatch"
-        );
+        HookCallbacks.validateInitialization(key, token0, token1);
         
-        // Initialize Kyle model parameters
         uint256 currentTotalOI = volatilityState.longOI + volatilityState.shortOI;
         _updateKyleParameters(volatilityState.effectiveVolatility, kyleState.baseDepth);
         _updatePreviousTotalOI(currentTotalOI);
@@ -151,97 +164,97 @@ contract OrderbookHook is
     }
 
     /// @notice Hook called before a swap
-    /// @dev This is where the hybrid orderbook-AMM routing happens
-    /// @param sender The address initiating the swap
-    /// @param key The pool key
-    /// @param params The swap parameters
-    /// @param hookData Additional data passed to the hook
-    /// @return bytes4 The function selector
-    /// @return BeforeSwapDelta The balance delta from orderbook matching
-    /// @return uint24 Optional LP fee override
+    /// @dev Routes to appropriate pricing engine based on CurveMode
     function beforeSwap(
         address sender,
         PoolKey calldata key,
         SwapParams calldata params,
         bytes calldata hookData
     ) external override nonReentrant returns (bytes4, BeforeSwapDelta, uint24) {
-        // Step 1: Try orderbook matching first
-        (uint256 orderbookVolume, uint256 avgPrice) = _matchOrders();
+        uint256 totalVolume = HookHelpers.calculateTotalVolume(params.amountSpecified);
+        bool isLong = params.zeroForOne; // zeroForOne = buying vBTC = long
         
-        // Step 2: Calculate total volume
-        uint256 totalVolume = params.amountSpecified > 0 
-            ? uint256(params.amountSpecified) 
-            : uint256(-params.amountSpecified);
+        uint256 executionPrice;
+        uint256 priceImpact;
+        BeforeSwapDelta delta;
         
-        // Step 3: Route remaining volume to AMM if needed
-        uint256 ammVolume = totalVolume > orderbookVolume ? totalVolume - orderbookVolume : 0;
-        uint256 ammOutput = ammVolume > 0 ? _executeSwap(params.zeroForOne, ammVolume) : 0;
+        // Route based on active curve mode
+        if (curveModeState.activeMode == CurveMode.VAMM) {
+            // VAMM Mode: Use custom curve P = K × Q^(-2)
+            (executionPrice, priceImpact) = _executeCurveTrade(totalVolume, isLong);
+            
+            // Update volatility based on OI change
+            _updateOpenInterest(isLong, int256(totalVolume));
+            
+            // Create delta based on execution
+            (delta,,) = HookCallbacks.processBeforeSwap(
+                params,
+                0, // No orderbook volume in VAMM
+                executionPrice,
+                totalVolume
+            );
+            
+        } else if (curveModeState.activeMode == CurveMode.ORACLE) {
+            // Oracle Mode: Use Chainlink price for instant execution
+            (int256 oraclePrice, ) = getLatestPrice(token0);
+            executionPrice = oraclePrice > 0 ? uint256(oraclePrice) : 0;
+            
+            (delta,,) = HookCallbacks.processBeforeSwap(
+                params,
+                totalVolume, // All volume at oracle price
+                executionPrice,
+                0
+            );
+            
+        } else {
+            // LOB or HYBRID Mode: Use existing orderbook + AMM logic
+            (uint256 orderbookVolume, uint256 avgPrice) = _matchOrders();
+            uint256 ammOutput = 0;
+            
+            uint256 ammVolume = HookHelpers.calculateAmmVolume(totalVolume, orderbookVolume);
+            
+            if (ammVolume > 0 && curveModeState.usePool) {
+                ammOutput = _executeSwap(params.zeroForOne, ammVolume);
+            }
+            
+            (delta,,) = HookCallbacks.processBeforeSwap(
+                params,
+                orderbookVolume,
+                avgPrice,
+                ammOutput
+            );
+            
+            executionPrice = avgPrice;
+        }
         
-        // Step 4: Track order flow for Kyle model
-        _trackOrderFlow(params.zeroForOne ? int256(totalVolume) : -int256(totalVolume));
-        
-        // Step 5: Update component indicator
+        // Track order flow and volume for all modes
+        _trackOrderFlow(isLong ? int256(totalVolume) : -int256(totalVolume));
         _trackVolume(totalVolume);
         
-        // Step 6: Calculate dynamic fee
+        // Calculate dynamic fee based on current state
         uint24 dynamicFee = _calculateDynamicFeeWithParams(
             volatilityState.effectiveVolatility,
             volatilityState.baseVolatility,
             volatilityState.longOI,
             volatilityState.shortOI,
-            5000 // 50% utilization as default
+            5000
         );
         
-        // Step 7: Create balance delta for orderbook matches
-        BeforeSwapDelta delta = _createBeforeSwapDelta(orderbookVolume, avgPrice, params.zeroForOne);
-        
-        // Emit swap event
         emit SwapExecuted(
             sender,
             params.zeroForOne,
             totalVolume,
-            orderbookVolume + ammOutput,
-            orderbookVolume,
-            ammVolume,
+            executionPrice,
+            curveModeState.activeMode == CurveMode.VAMM ? 0 : totalVolume,
+            curveModeState.activeMode == CurveMode.VAMM ? totalVolume : 0,
             block.timestamp
         );
         
         return (this.beforeSwap.selector, delta, dynamicFee);
     }
 
-    /// @notice Helper function to create BeforeSwapDelta (reduces stack depth)
-    /// @param orderbookVolume Volume matched in orderbook
-    /// @param avgPrice Average execution price
-    /// @param zeroForOne Direction of swap
-    /// @return delta The BeforeSwapDelta
-    function _createBeforeSwapDelta(
-        uint256 orderbookVolume,
-        uint256 avgPrice,
-        bool zeroForOne
-    ) internal pure returns (BeforeSwapDelta delta) {
-        if (orderbookVolume == 0) {
-            return BeforeSwapDeltaLibrary.ZERO_DELTA;
-        }
-        
-        int128 specified = zeroForOne 
-            ? -int128(int256(orderbookVolume))
-            : int128(int256(orderbookVolume));
-        int128 unspecified = zeroForOne
-            ? int128(int256(orderbookVolume * avgPrice / 1e18))
-            : -int128(int256(orderbookVolume * avgPrice / 1e18));
-        
-        return toBeforeSwapDelta(specified, unspecified);
-    }
-
     /// @notice Hook called after a swap
     /// @dev Update system parameters based on swap results
-    /// @param sender The address that initiated the swap
-    /// @param key The pool key
-    /// @param params The swap parameters
-    /// @param delta The balance delta from the swap
-    /// @param hookData Additional data passed to the hook
-    /// @return bytes4 The function selector
-    /// @return int128 The hook's delta in unspecified currency
     function afterSwap(
         address sender,
         PoolKey calldata key,
@@ -249,64 +262,42 @@ contract OrderbookHook is
         BalanceDelta delta,
         bytes calldata hookData
     ) external override returns (bytes4, int128) {
-        // Step 1: Check if Kyle parameters need updating
         uint256 currentTotalOI = volatilityState.longOI + volatilityState.shortOI;
+        
+        // Update Kyle parameters if needed
         if (_shouldUpdateKyleParameters(currentTotalOI)) {
             _updateKyleParameters(volatilityState.effectiveVolatility, kyleState.baseDepth);
             _updatePreviousTotalOI(currentTotalOI);
         }
         
-        // Step 2: Check if volatility needs updating
+        // Update volatility if needed
         if (_shouldUpdateVolatility()) {
             uint256 newVolatility = calculateEffectiveVolatility();
             _updatePreviousEffectiveVolatility();
-            // Adjust pool depth based on new volatility
             uint256 adjustedDepth = _adjustPoolDepth(kyleState.baseDepth);
             _updateKyleParameters(newVolatility, adjustedDepth);
         }
         
-        // Step 3: Update component indicator
+        // Perform decomposition if enough data
         if (historicalVolume.length >= 3) {
             _performDecomposition();
-        }
-        
-        // Step 4: Check if de-leveraging is needed
-        if (_shouldPrioritizeDeleveraging()) {
-            // De-leveraging priority mode activated
-            // This would trigger liquidations in a full implementation
         }
         
         return (this.afterSwap.selector, 0);
     }
 
     /// @notice Hook called before liquidity is added
-    /// @param sender The address adding liquidity
-    /// @param key The pool key
-    /// @param params The modify liquidity parameters
-    /// @param hookData Additional data passed to the hook
-    /// @return bytes4 The function selector
     function beforeAddLiquidity(
         address sender,
         PoolKey calldata key,
         ModifyLiquidityParams calldata params,
         bytes calldata hookData
     ) external override returns (bytes4) {
-        // Validate liquidity parameters
-        require(params.liquidityDelta > 0, "Invalid liquidity delta");
-        require(params.tickLower < params.tickUpper, "Invalid tick range");
-        
+        HookCallbacks.validateLiquidityParams(params, true);
         return this.beforeAddLiquidity.selector;
     }
 
     /// @notice Hook called after liquidity is added
-    /// @param sender The address that added liquidity
-    /// @param key The pool key
-    /// @param params The modify liquidity parameters
-    /// @param delta The balance delta
-    /// @param feesAccrued The fees accrued
-    /// @param hookData Additional data passed to the hook
-    /// @return bytes4 The function selector
-    /// @return BalanceDelta The hook's delta
     function afterAddLiquidity(
         address sender,
         PoolKey calldata key,
@@ -315,40 +306,23 @@ contract OrderbookHook is
         BalanceDelta feesAccrued,
         bytes calldata hookData
     ) external override returns (bytes4, BalanceDelta) {
-        // Update pool depth based on new liquidity
         uint256 adjustedDepth = _adjustPoolDepth(kyleState.baseDepth);
         _updateKyleParameters(volatilityState.effectiveVolatility, adjustedDepth);
-        
         return (this.afterAddLiquidity.selector, toBalanceDelta(0, 0));
     }
 
     /// @notice Hook called before liquidity is removed
-    /// @param sender The address removing liquidity
-    /// @param key The pool key
-    /// @param params The modify liquidity parameters
-    /// @param hookData Additional data passed to the hook
-    /// @return bytes4 The function selector
     function beforeRemoveLiquidity(
         address sender,
         PoolKey calldata key,
         ModifyLiquidityParams calldata params,
         bytes calldata hookData
     ) external override returns (bytes4) {
-        // Validate removal parameters
-        require(params.liquidityDelta < 0, "Invalid liquidity delta");
-        
+        HookCallbacks.validateLiquidityParams(params, false);
         return this.beforeRemoveLiquidity.selector;
     }
 
     /// @notice Hook called after liquidity is removed
-    /// @param sender The address that removed liquidity
-    /// @param key The pool key
-    /// @param params The modify liquidity parameters
-    /// @param delta The balance delta
-    /// @param feesAccrued The fees accrued
-    /// @param hookData Additional data passed to the hook
-    /// @return bytes4 The function selector
-    /// @return BalanceDelta The hook's delta
     function afterRemoveLiquidity(
         address sender,
         PoolKey calldata key,
@@ -357,113 +331,62 @@ contract OrderbookHook is
         BalanceDelta feesAccrued,
         bytes calldata hookData
     ) external override returns (bytes4, BalanceDelta) {
-        // Update pool depth based on removed liquidity
         uint256 adjustedDepth = _adjustPoolDepth(kyleState.baseDepth);
         _updateKyleParameters(volatilityState.effectiveVolatility, adjustedDepth);
-        
         return (this.afterRemoveLiquidity.selector, toBalanceDelta(0, 0));
     }
 
     // ============ Public Functions for Users ============
 
     /// @notice Deposit tokens into custody
-    /// @param token Address of the token to deposit
-    /// @param amount Amount to deposit
     function deposit(address token, uint256 amount) external override nonReentrant {
-        // Validate inputs
-        InputValidator.validateAddress(token, "token");
-        InputValidator.validateNonZeroAmount(amount);
-        
+        UserOperations.validateDeposit(token, amount);
         _deposit(token, amount);
     }
 
     /// @notice Withdraw available tokens from custody
-    /// @param token Address of the token to withdraw
-    /// @param amount Amount to withdraw
     function withdraw(address token, uint256 amount) external override nonReentrant {
-        // Validate inputs
-        InputValidator.validateAddress(token, "token");
-        InputValidator.validateNonZeroAmount(amount);
-        
+        UserOperations.validateWithdrawal(token, amount);
         _withdraw(token, amount);
     }
 
     /// @notice Place a limit order
-    /// @param isBuy True for buy order, false for sell order
-    /// @param price Order price (18 decimals)
-    /// @param quantity Order quantity
-    /// @return orderId The unique order ID
     function placeOrder(bool isBuy, uint256 price, uint256 quantity) 
         external 
         nonReentrant 
         whenNotPaused
         returns (uint256 orderId) 
     {
-        // Validate inputs
-        InputValidator.validateNonZeroAmount(price);
-        InputValidator.validateNonZeroAmount(quantity);
-        
-        // Validate price range (min: 1 wei, max: 1e30 to prevent overflow)
-        InputValidator.validatePriceRange(price, 1, 1e30);
-        
-        // Validate quantity range (min: 1 wei, max: 1e30 to prevent overflow)
-        InputValidator.validateQuantityRange(quantity, 1, 1e30);
-        
+        UserOperations.validateOrderPlacement(price, quantity);
         return _placeOrder(isBuy, price, quantity);
     }
 
     /// @notice Cancel an existing order
-    /// @param orderId The order ID to cancel
     function cancelOrder(uint256 orderId) external nonReentrant {
-        // Validate order ID (must be non-zero and within valid range)
         if (orderId == 0 || orderId >= nextOrderId) {
             revert OrderNotFound(orderId);
         }
-        
         _cancelOrder(orderId);
     }
 
     /// @notice Add liquidity to the AMM
-    /// @param tickLower Lower tick boundary
-    /// @param tickUpper Upper tick boundary
-    /// @param amount0Desired Desired amount of token0
-    /// @param amount1Desired Desired amount of token1
-    /// @return liquidity The amount of liquidity added
-    /// @return amount0 Actual amount of token0 used
-    /// @return amount1 Actual amount of token1 used
     function addLiquidity(
         int24 tickLower,
         int24 tickUpper,
         uint256 amount0Desired,
         uint256 amount1Desired
     ) external nonReentrant whenNotPaused returns (uint128 liquidity, uint256 amount0, uint256 amount1) {
-        // Validate tick range
-        InputValidator.validateTickRange(tickLower, tickUpper);
-        
-        // Validate amounts
-        InputValidator.validateNonZeroAmount(amount0Desired);
-        InputValidator.validateNonZeroAmount(amount1Desired);
-        
+        UserOperations.validateAddLiquidity(tickLower, tickUpper, amount0Desired, amount1Desired);
         return _addLiquidity(tickLower, tickUpper, amount0Desired, amount1Desired);
     }
 
     /// @notice Remove liquidity from the AMM
-    /// @param tickLower Lower tick boundary
-    /// @param tickUpper Upper tick boundary
-    /// @param liquidityToRemove Amount of liquidity to remove
-    /// @return amount0 Amount of token0 returned
-    /// @return amount1 Amount of token1 returned
     function removeLiquidity(
         int24 tickLower,
         int24 tickUpper,
         uint128 liquidityToRemove
     ) external nonReentrant whenNotPaused returns (uint256 amount0, uint256 amount1) {
-        // Validate tick range
-        InputValidator.validateTickRange(tickLower, tickUpper);
-        
-        // Validate liquidity amount
-        InputValidator.validateNonZeroAmount(liquidityToRemove);
-        
+        UserOperations.validateRemoveLiquidity(tickLower, tickUpper, liquidityToRemove);
         return _removeLiquidity(tickLower, tickUpper, liquidityToRemove);
     }
 
@@ -497,6 +420,74 @@ contract OrderbookHook is
     /// @return sellDepth Number of sell orders
     function getOrderbookDepth() external view returns (uint256 buyDepth, uint256 sellDepth) {
         return (buyOrderIds.length, sellOrderIds.length);
+    }
+
+    /// @notice Get current curve mode
+    /// @return mode The active CurveMode (LOB, HYBRID, VAMM, ORACLE)
+    function getCurveMode() external view returns (CurveMode) {
+        return curveModeState.activeMode;
+    }
+
+    /// @notice Get full curve mode configuration
+    /// @return _curveModeState The full curve mode state
+    function getCurveModeState() external view returns (CurveModeState memory) {
+        return curveModeState;
+    }
+
+    /// @notice Set curve mode (admin only)
+    /// @param mode The new curve mode
+    /// @param oracleFeed Optional oracle feed address for ORACLE mode
+    function setCurveMode(CurveMode mode, address oracleFeed) external onlyAdmin {
+        curveModeState.activeMode = mode;
+        curveModeState.lastModeChange = block.number;
+        
+        // Configure mode-specific settings
+        if (mode == CurveMode.LOB) {
+            curveModeState.useOrderbook = true;
+            curveModeState.usePool = false;
+            curveModeState.oracleFeed = address(0);
+        } else if (mode == CurveMode.HYBRID) {
+            curveModeState.useOrderbook = true;
+            curveModeState.usePool = true;
+            curveModeState.oracleFeed = address(0);
+        } else if (mode == CurveMode.VAMM) {
+            curveModeState.useOrderbook = false;
+            curveModeState.usePool = true;
+            curveModeState.oracleFeed = address(0);
+        } else if (mode == CurveMode.ORACLE) {
+            curveModeState.useOrderbook = false;
+            curveModeState.usePool = false;
+            curveModeState.oracleFeed = oracleFeed;
+        }
+    }
+
+    /// @notice Initialize the VAMM custom curve (admin only)
+    /// @dev Must be called before using VAMM mode
+    /// @param initialPrice The starting price for the curve (scaled 1e18)
+    /// @param initialQuantity The initial vBTC quantity in pool
+    function initializeVAMMCurve(uint256 initialPrice, uint256 initialQuantity) external onlyAdmin {
+        _initializeCurve(initialPrice, initialQuantity);
+    }
+
+    /// @notice Get custom curve state for VAMM mode
+    /// @return k Pool constant
+    /// @return q Current vBTC quantity
+    /// @return price Current price from P=K×Q^(-2)
+    /// @return sensitivity Price sensitivity |dP/dQ|
+    function getVAMMCurveState() 
+        external 
+        view 
+        returns (
+            uint256 k,
+            uint256 q, 
+            uint256 price,
+            uint256 sensitivity
+        ) 
+    {
+        k = poolConstant;
+        q = vBTCQuantity;
+        price = calculateCurvePrice();
+        sensitivity = calculatePriceSensitivity();
     }
 
     // ============ Admin Functions ============

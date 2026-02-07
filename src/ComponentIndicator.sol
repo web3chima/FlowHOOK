@@ -42,6 +42,34 @@ contract ComponentIndicator {
         state.lastUpdateBlock = block.number;
     }
 
+    // ============ Public Update Functions ============
+
+    /// @notice Update trading activity from external contracts
+    /// @param volume The volume of the trade
+    /// @param timestamp The timestamp of the trade
+    function updateTradingActivity(uint256 volume, uint256 timestamp) external {
+        _trackVolume(volume);
+        
+        // Perform decomposition if we have enough data
+        if (historicalVolume.length >= 3) {
+            _performDecomposition();
+        }
+    }
+
+    /// @notice Update with full trade details
+    /// @param volume Trade volume
+    /// @param oiDelta Change in open interest
+    /// @param isLong Whether this is a long position
+    function updateFullActivity(uint256 volume, int256 oiDelta, bool isLong) external {
+        _trackVolume(volume);
+        _trackOpenInterest(oiDelta);
+        
+        // Perform decomposition if we have enough data
+        if (historicalVolume.length >= 3) {
+            _performDecomposition();
+        }
+    }
+
     // ============ Activity Tracking Functions ============
 
     /// @notice Track trading volume

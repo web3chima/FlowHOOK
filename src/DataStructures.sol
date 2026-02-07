@@ -4,6 +4,20 @@ pragma solidity ^0.8.24;
 /// @title Core Data Structures for FlowHook
 /// @notice Defines all core data structures used throughout the system
 
+/// @notice Curve pricing mode - determines market mechanics
+/// @dev LOB = Limit Order Book (Binance style), HYBRID = Orderbook+AMM (dYdX style)
+/// @dev VAMM = Virtual AMM (Perpetual style), ORACLE = Oracle-based (GMX/GNS style)
+enum CurveMode { LOB, HYBRID, VAMM, ORACLE }
+
+/// @notice Configuration state for curve mode
+struct CurveModeState {
+    CurveMode activeMode;       // Current pricing mode
+    address oracleFeed;         // Chainlink oracle (ORACLE mode)
+    bool useOrderbook;          // Enable orderbook matching (LOB/HYBRID)
+    bool usePool;               // Enable AMM pool routing (HYBRID/VAMM)
+    uint256 lastModeChange;     // Block when mode was last changed
+}
+
 /// @notice Represents a limit order in the orderbook
 struct Order {
     uint256 orderId;

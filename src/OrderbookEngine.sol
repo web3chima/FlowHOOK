@@ -327,6 +327,12 @@ abstract contract OrderbookEngine is CustodyManager {
         return userPositionSize[user];
     }
 
+    /// @notice Get the maximum position size limit
+    /// @return The maximum position size per user
+    function getMaxPositionSize() external view returns (uint256) {
+        return maxPositionSizePerUser;
+    }
+
     /// @notice Set maximum position size per user (admin only)
     /// @param newLimit The new maximum position size
     function _setMaxPositionSize(uint256 newLimit) internal {

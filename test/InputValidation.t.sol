@@ -381,6 +381,9 @@ contract InputValidationTest is Test {
         mockToken1.mint(user1, 1e31);
         hook.deposit(token1, 1e31);
         
+        // Get max position size
+        uint256 maxPositionSize = hook.getMaxPositionSize();
+        
         if (quantity == 0) {
             // Zero quantity should revert
             vm.expectRevert(ZeroAmount.selector);
@@ -388,6 +391,10 @@ contract InputValidationTest is Test {
         } else if (quantity > 1e30) {
             // Quantity too high should revert
             vm.expectRevert(abi.encodeWithSelector(InvalidInput.selector, "quantity out of bounds"));
+            hook.placeOrder(true, 1e18, quantity);
+        } else if (quantity > maxPositionSize) {
+            // Position size exceeded should revert
+            vm.expectRevert();
             hook.placeOrder(true, 1e18, quantity);
         } else {
             // Valid quantity should succeed

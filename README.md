@@ -2,43 +2,94 @@
 
 A custom curve, independent market pricing mechanics system built as a Uniswap V4 hook contract, implementing Kyle model with dynamic volatility indicator based on open interest composition.
 
-## Project Structure
+## 🎯 Enhanced Features (Latest Deployment)
+
+- **Kyle Model Integration**: λ-based price impact calculation with cumulative order flow tracking
+- **Dynamic Volatility**: OI-based volatility adjustments (+3.569e-9 long / -1.678e-9 short)
+- **EIP-1153 TSTORE/TLOAD**: Transient storage for zero-cost mid-swap computations
+- **Component Indicator**: ARIMA decomposition for expected/unexpected trading activity
+
+## 📍 Deployed Contracts (Sepolia Testnet)
+
+| Contract | Address |
+|----------|---------|
+| **FlowHookRouter** | [`0x316b52b9A364645b267c4a8eC69C871D917Ee2DD`](https://sepolia.etherscan.io/address/0x316b52b9A364645b267c4a8eC69C871D917Ee2DD) |
+| **VAMMEngine** | [`0x6e5Dd3469def787961f7DBf865c99eEffE264A3c`](https://sepolia.etherscan.io/address/0x6e5Dd3469def787961f7DBf865c99eEffE264A3c) |
+| **FeeEngine** | [`0xa5FeD68B6CF5818d14B2b1D245C49c04c856eeAf`](https://sepolia.etherscan.io/address/0xa5FeD68B6CF5818d14B2b1D245C49c04c856eeAf) |
+| **OrderbookEngine** | [`0x3cCf24C3bF3F8B2908659C297068d298702E748A`](https://sepolia.etherscan.io/address/0x3cCf24C3bF3F8B2908659C297068d298702E748A) |
+| **OracleEngine** | [`0x8Cd04F7C865dD940b906EdD9543e8E94BF42388f`](https://sepolia.etherscan.io/address/0x8Cd04F7C865dD940b906EdD9543e8E94BF42388f) |
+
+**Deployment Date**: 2026-02-07 | **Network**: Sepolia (chainId: 11155111) | **EVM**: Cancun
+
+## 📁 Project Structure
 
 ```
 .
-├── src/
-│   ├── DataStructures.sol      # Core data structures
+├── src/                         # Solidity contracts
+│   ├── modules/                 # Modular architecture (deployed)
+│   │   ├── FlowHookRouter.sol   # Main Uniswap V4 hook router
+│   │   ├── VAMMEngine.sol       # Enhanced VAMM + Kyle model + TSTORE
+│   │   ├── FeeEngine.sol        # Dynamic fee calculations
+│   │   ├── OrderbookEngine.sol  # Limit order book
+│   │   ├── OracleEngine.sol     # Price oracle integration
+│   │   └── Interfaces.sol       # Contract interfaces
+│   │
+│   ├── libraries/               # Math libraries
+│   │   ├── CurveMath.sol        # P = K × Q^(-2) curve math
+│   │   ├── KyleMath.sol         # Kyle model calculations
+│   │   ├── VolatilityMath.sol   # OI-volatility coefficients
+│   │   ├── OrderbookMath.sol    # Orderbook operations
+│   │   └── StorageOptimization.sol
+│   │
+│   ├── KyleModel.sol            # Kyle price impact (abstract)
+│   ├── VolatilityCalculator.sol # OI-based volatility (abstract)
+│   ├── ComponentIndicator.sol   # ARIMA activity decomposition
+│   ├── CustomCurveEngine.sol    # Alternative curve engine
+│   ├── DynamicFeeCalculator.sol # Fee calculation logic
+│   ├── OracleManager.sol        # Chainlink integration
+│   ├── OrderbookHook.sol        # Full monolithic hook (reference)
+│   ├── DataStructures.sol       # Core data structures
 │   ├── Constants.sol            # System constants
-│   ├── Errors.sol               # Custom error definitions
-│   ├── Events.sol               # Event definitions
-│   └── interfaces/
-│       └── IOrderbookHook.sol   # FlowHook interface definitions
-├── test/
-│   └── Setup.t.sol              # Base test setup
+│   ├── Errors.sol               # Custom errors
+│   └── Events.sol               # Event definitions
+│
+├── frontend/                    # React frontend
+│   ├── src/
+│   │   ├── abi/
+│   │   │   └── contracts.ts     # ABIs + deployed addresses
+│   │   ├── components/          # React components
+│   │   │   ├── admin/           # Admin dashboard
+│   │   │   ├── orderbook/       # Orderbook views
+│   │   │   ├── trading/         # Trading interface
+│   │   │   └── vamm/            # VAMM visualizations
+│   │   ├── hooks/               # Custom React hooks
+│   │   │   ├── useVAMM.ts       # VAMM state hook
+│   │   │   ├── useOrderbook.ts  # Orderbook hook
+│   │   │   └── useFees.ts       # Fee calculation hook
+│   │   └── lib/contracts/       # Contract utilities
+│   └── .env                     # Environment config
+│
 ├── script/                      # Deployment scripts
-├── lib/                         # Dependencies
-│   ├── forge-std/               # Foundry standard library
-│   ├── v4-core/                 # Uniswap V4 core
-│   └── chainlink-brownie-contracts/  # Chainlink oracles
-└── foundry.toml                 # Foundry configuration
-
-```
-## System Architecture 
-
-FlowHook System Architecture
- High-Level Overview
-
-FlowHook is a Uniswap V4 hook that combines a deleveraging indicator, custom curve,
-independent market pricing mechanics, and dynamic fees in a single Solidity contract.
-
-
+│   ├── DeployModular.s.sol      # Modular deployment
+│   └── Deploy.s.sol             # Original deployment
+│
+├── test/                        # Foundry tests
+│   ├── CustomCurveEngine.t.sol  # Curve tests
+│   ├── KyleModel.t.sol          # Kyle model tests
+│   ├── VolatilityCalculator.t.sol
+│   └── OrderbookHookIntegration.t.sol
+│
+└── broadcast/                   # Deployment logs
 ```
 
+## 🏗 System Architecture 
+
+```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        UNISWAP V4 POOL MANAGER                     │
 │                                                                     │
 │  ┌───────────────────────────────────────────────────────────────┐  │
-│  │                    FlowHook.sol (Single Contract)             │  │
+│  │                    FlowHookRouter.sol                         │  │
 │  │                                                               │  │
 │  │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐  │  │
 │  │  │  beforeSwap  │  │  afterSwap   │  │  beforeModify       │  │  │
@@ -51,7 +102,7 @@ independent market pricing mechanics, and dynamic fees in a single Solidity cont
 │  │  │                                                        │   │  │
 │  │  │  TSTORE/TLOAD: mid-transaction computation scratch     │   │  │
 │  │  │  - Pool depth deltas (ΔQ_vBTC)                         │   │  │
-│  │  │  - Intermediate volatility estimates                    │   │  │
+│  │  │  - Reentrancy lock (zero-cost guard)                   │   │  │
 │  │  │  - Fee calculation intermediaries                       │   │  │
 │  │  │  - Component decomposition working data                │   │  │
 │  │  │                                                        │   │  │
@@ -61,198 +112,117 @@ independent market pricing mechanics, and dynamic fees in a single Solidity cont
 │  │         ┌────────────────┼────────────────┐                   │  │
 │  │         ▼                ▼                ▼                   │  │
 │  │  ┌────────────┐  ┌────────────┐  ┌──────────────┐            │  │
-│  │  │  CUSTOM    │  │  DYNAMIC   │  │  COMPONENT   │            │  │
-│  │  │  CURVE     │  │  FEE       │  │  INDICATOR   │            │  │
+│  │  │  VAMM      │  │  FEE       │  │  ORDERBOOK   │            │  │
 │  │  │  ENGINE    │  │  ENGINE    │  │  ENGINE      │            │  │
+│  │  │            │  │            │  │              │            │  │
+│  │  │ Kyle Model │  │ Dynamic    │  │ Limit Order  │            │  │
+│  │  │ Volatility │  │ Fees       │  │ Matching     │            │  │
 │  │  └─────┬──────┘  └─────┬──────┘  └──────┬───────┘            │  │
 │  │        │               │                │                    │  │
 │  └────────┼───────────────┼────────────────┼────────────────────┘  │
 │           │               │                │                       │
 └───────────┼───────────────┼────────────────┼───────────────────────┘
-           │               │                │
-           ▼               ▼                ▼
 ```
 
-## Core Engines
+## 🔬 VAMMEngine Enhanced Features
 
-Custom Curve Engine — Deleveraging & Independent Pricing
-
-
-Implements the pricing formula derived from the critical asymmetry finding:
-
-
-```
-P_vBTC = k × Q_vBTC⁻²
-
-
-Where:
- k       = pool constant
- Q_vBTC  = quantity of vBTC in pool
- P_vBTC  = derived price
-
-
-Long opened  → Q_vBTC decreases → P sensitivity increases → volatility ↑
-Short opened → Q_vBTC increases → P sensitivity decreases → volatility ↓
+### Kyle Model Integration
+```solidity
+// Price impact: λ × orderFlow
+function getKyleModelState() external view returns (
+    uint256 lambda,      // Price impact coefficient
+    int256 flow,         // Cumulative order flow
+    uint256 depth        // Effective market depth
+);
 ```
 
-
-Supports 4 independent pricing mechanisms via a unified interface:
-
-
-```
-┌───────────────────────────────────────────────────────┐
-│              CUSTOM CURVE ENGINE                      │
-│                                                       │
-│  ┌─────────────┐  ┌─────────────┐                    │
-│  │ LOB Mode    │  │ Hybrid Mode │                    │
-│  │ (Binance    │  │ (dYdX       │                    │
-│  │  style)     │  │  style)     │                    │
-│  │             │  │             │                    │
-│  │ Traders:    │  │ Traders:    │                    │
-│  │ Price MAKERS│  │ Price MAKERS│                    │
-│  └─────────────┘  └─────────────┘                    │
-│                                                       │
-│  ┌─────────────┐  ┌──────────────────┐               │
-│  │ VAMM Mode  │  │ Oracle Mode      │               │
-│  │ (Perp       │  │ (GMX/GNS style)  │               │
-│  │  style)     │  │                  │               │
-│  │             │  │ Traders:         │               │
-│  │ Traders:    │  │ Price TAKERS     │               │
-│  │ Pool MOVERS │  │                  │               │
-│  └──────┬──────┘  └────────┬─────────┘               │
-│         │                  │                         │
-│         │         ┌────────▼─────────┐               │
-│         │         │ Chainlink Oracle │               │
-│         │         │ Price Feed       │               │
-│         │         └──────────────────┘               │
-│         │                                            │
-│         ▼                                            │
-│  ┌──────────────────────────────────┐                │
-│  │ Long/Short Asymmetry Handler    │                │
-│  │                                  │                │
-│  │ Long OI coef:  +3.569e-9  (↑σ)  │                │
-│  │ Short OI coef: -1.678e-9  (↓σ)  │                │
-│  │                                  │                │
-│  │ Deleveraging trigger logic:      │                │
-│  │ When σ_estimated > threshold →   │                │
-│  │ adjust curve to reduce exposure  │                │
-│  └──────────────────────────────────┘                │
-└───────────────────────────────────────────────────────┘
+### Volatility Calculator
+```solidity
+// OI-based volatility adjustment
+function getVolatilityInfo() external view returns (
+    uint256 baseVol,      // Base volatility (2%)
+    uint256 effectiveVol, // Adjusted volatility
+    uint256 longOI,       // Long open interest
+    uint256 shortOI       // Short open interest
+);
 ```
 
-## Dynamic Fee Engine — VAMM Hook Swap Fees
+### TSTORE/TLOAD Events
+```solidity
+event CurveTradeExecuted(
+    bool isLong, 
+    uint256 size, 
+    uint256 executionPrice, 
+    uint256 priceImpact,
+    uint256 kyleLambda,           // NEW: Kyle lambda
+    uint256 effectiveVolatility   // NEW: Current volatility
+);
 
-
-```
-┌───────────────────────────────────────────────────┐
-│              DYNAMIC FEE ENGINE                   │
-│                                                   │
-│  Inputs (from transient storage):                 │
-│  ├── Current pool depth (Q_vBTC)                  │
-│  ├── Open interest imbalance (long - short)       │
-│  ├── Estimated volatility (σ_hat)                 │
-│  └── Speculative component ratio                  │
-│                                                   │
-│              ┌──────────────┐                     │
-│              │  Fee = f(σ,  │                     │
-│              │    OI_imbal, │                     │
-│              │    depth)    │                     │
-│              └──────┬───────┘                     │
-│                     │                             │
-│                     ▼                             │
-│  ┌──────────────────────────────────────┐         │
-│  │ Higher volatility    → Higher fee    │         │
-│  │ Deeper pool          → Lower fee     │         │
-│  │ OI imbalance (longs) → Higher fee    │         │
-│  │ Balanced OI          → Base fee      │         │
-│  └──────────────────────────────────────┘         │
-└───────────────────────────────────────────────────┘
-
-```
-## Component Indicator Engine — Decomposition
-
-Splits trading activity into expected (hedger/informed) and unexpected (speculative):
-
-```
-┌───────────────────────────────────────────────────────┐
-│           COMPONENT INDICATOR ENGINE                  │
-│                                                       │
-│  Raw Trading Activity                                 │
-│  ┌──────────┬──────────┬──────────┬──────────┐        │
-│  │ Volume   │ Open     │ Liquida- │ Leverage │        │
-│  │          │ Interest │ tions    │          │        │
-│  └────┬─────┴────┬─────┴────┬─────┴────┬─────┘        │
-│       │          │          │          │              │
-│       ▼          ▼          ▼          ▼              │
-│  ┌──────────────────────────────────────────┐         │
-│  │         ARIMA Decomposition              │         │
-│  │         (on-chain approximation)         │         │
-│  └─────────────┬────────────────────────────┘         │
-│                │                                      │
-│       ┌────────┴────────┐                             │
-│       ▼                 ▼                             │
-│  ┌──────────┐     ┌───────────┐                       │
-│  │ EXPECTED │     │ UNEXPECTED│                       │
-│  │ (Hedger/ │     │ (Specula- │                       │
-│  │ Informed)│     │  tive)    │                       │
-│  └──────────┘     └───────────┘                       │
-│                                                       │
-│  → Fed to Custom Curve + Dynamic Fee engines          │
-│  → Exposed to Admin Dashboard                         │
-└───────────────────────────────────────────────────────┘
-
+event VolatilityUpdated(uint256 newVolatility, uint256 longOI, uint256 shortOI);
+event KyleParametersUpdated(uint256 lambda, uint256 depth);
+event TransientStateStored(bytes32 slot, uint256 value);
 ```
 
-## Dependencies
-
-- **Uniswap V4 Core**: Hook integration and pool management
-- **OpenZeppelin Contracts**: Access control and utilities (via v4-core)
-- **Chainlink**: Price feed oracles
-- **Forge-std**: Testing framework
-
-## Key Features
-
-- Traditional orderbook with price-time priority
-- Kyle model price impact calculation
-- Dynamic volatility based on open interest (OI)
-- Concentrated liquidity AMM integration
-- EIP-1153 transient storage for gas optimization
-- Property-based testing framework
-
-## OI-Volatility Relationship
-
-- **Long OI**: Increases volatility (+3.569e-9 coefficient)
-- **Short OI**: Decreases volatility (-1.678e-9 coefficient)
-
-## Build & Test
+## 🛠 Build & Deploy
 
 ```bash
-# Build the project
+# Build
 forge build
 
-# Run tests
+# Test
 forge test
 
-# Run property-based tests
-forge test --match-contract PropertyTest
-
-# Run with verbosity
-forge test -vvv
+# Deploy to Sepolia
+forge script script/DeployModular.s.sol:DeployModularScript \
+  --rpc-url https://ethereum-sepolia-rpc.publicnode.com \
+  --broadcast --verify -vvv
 ```
 
-## Configuration
+## ⚙️ Frontend Configuration
 
-- **Solidity Version**: 0.8.24+
-- **EVM Version**: Cancun (for EIP-1153 support)
-- **Target Network**: Arc testnet (Prague EVM)
-- **Fuzz Runs**: 256 (default), 1000 (PBT profile)
+The frontend automatically uses the deployed addresses from `frontend/src/abi/contracts.ts`:
 
-## Gas Targets
+```typescript
+export const CONTRACT_ADDRESSES = {
+    FLOW_HOOK_ROUTER: "0x437fc35a835B6F92D8D108b1d50c5600C3a99bC9",
+    VAMM_ENGINE: "0xAAAb75ddf3ac0C96c4fD3bE51e4F60dbAdcAdF12",
+    FEE_ENGINE: "0x8331238ED47802b1C33051c834c76D4bB71d09c9",
+    ORDERBOOK_ENGINE: "0x4885159349554bDFD8AaC481e86eea9331620280",
+    ORACLE_ENGINE: "0x3359eA439F0fdb1542bCC99fc1B7F1fd9cf5348C",
+    // ...
+};
+```
 
-- Simple swaps: 150,000 gas
-- Complex orderbook matches: 250,000 gas
-- Contract size: < 24KB
+## 📊 Implementation Status
 
-## Development Status
+### Smart Contracts ✅
 
-This project is under active development for hackathon demonstration.
+| Component | Status | Description |
+|-----------|--------|-------------|
+| `FlowHookRouter.sol` | ✅ Deployed | Main Uniswap V4 hook router |
+| `VAMMEngine.sol` | ✅ Enhanced | Kyle model + TSTORE + volatility |
+| `FeeEngine.sol` | ✅ Deployed | Dynamic fee calculations |
+| `OrderbookEngine.sol` | ✅ Deployed | Limit order matching |
+| `OracleEngine.sol` | ✅ Deployed | Price oracle |
+| `KyleModel.sol` | ✅ Complete | λ price impact |
+| `VolatilityCalculator.sol` | ✅ Complete | OI-based σ |
+| `ComponentIndicator.sol` | ✅ Complete | ARIMA decomposition |
+
+### Frontend ✅
+
+| Component | Status | Description |
+|-----------|--------|-------------|
+| `contracts.ts` | ✅ Updated | ABIs + addresses |
+| `VAMMDashboard.tsx` | ✅ Complete | Curve visualization |
+| `AdminDashboard.tsx` | ✅ Complete | Parameter controls |
+| `OrderbookView.tsx` | ✅ Complete | LOB/HYBRID display |
+
+## 🔒 Security Considerations
+
+⚠️ **Before Mainnet Deployment:**
+
+1. Complete security audit
+2. Formal verification of curve math
+3. Test on testnet with real usage patterns
+4. Review admin key management
+5. Set up monitoring and alerting
